@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+Cargo.lock.backup
+
+# Local DBs / secrets — NEVER commit
+*.zdb/
+*.zbkey
+*.zbpub
+secrets/
+data/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
