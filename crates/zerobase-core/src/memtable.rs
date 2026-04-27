@@ -87,6 +87,18 @@ impl MemTable {
         self.map.iter().map(|(k, v)| (k.as_slice(), v))
     }
 
+    /// Iterate entries in `[start, end)` in sorted key order. An empty `end`
+    /// (`&[]`) means unbounded.
+    pub fn range<'a>(
+        &'a self,
+        start: &'a [u8],
+        end: &'a [u8],
+    ) -> impl Iterator<Item = (&'a [u8], &'a Entry)> + 'a {
+        use std::ops::Bound;
+        let hi: Bound<&[u8]> = if end.is_empty() { Bound::Unbounded } else { Bound::Excluded(end) };
+        self.map.range::<[u8], _>((Bound::Included(start), hi)).map(|(k, v)| (k.as_slice(), v))
+    }
+
     fn entry_bytes(entry: &Entry) -> usize {
         match entry {
             Entry::Value(v) => v.len(),
@@ -109,6 +121,18 @@ mod tests {
         m.delete(b"a".to_vec());
         assert_eq!(m.get(b"a"), Some(&Entry::Tombstone));
         assert_eq!(m.get(b"missing"), None);
+    }
+
+    #[test]
+    fn range_respects_bounds() {
+        let mut m = MemTable::new();
+        for k in [b"a", b"b", b"c", b"d"] {
+            m.put(k.to_vec(), b"x".to_vec());
+        }
+        let got: Vec<&[u8]> = m.range(b"b", b"d").map(|(k, _)| k).collect();
+        assert_eq!(got, vec![&b"b"[..], &b"c"[..]]);
+        let all: Vec<&[u8]> = m.range(b"", b"").map(|(k, _)| k).collect();
+        assert_eq!(all, vec![&b"a"[..], &b"b"[..], &b"c"[..], &b"d"[..]]);
     }
 
     #[test]

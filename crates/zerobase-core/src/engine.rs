@@ -53,6 +53,16 @@ use crate::sstable;
 use crate::wal::{Op, WalReader, WalWriter};
 use crate::{Error, Result};
 
+/// One entry returned by a scan or range iterator. Tombstones are filtered
+/// out before they reach the caller.
+#[derive(Clone, Debug)]
+pub struct ScanItem {
+    /// Key bytes.
+    pub key: Vec<u8>,
+    /// Value bytes.
+    pub value: Vec<u8>,
+}
+
 /// Default flush threshold: 4 MiB of keys+values before we roll the MemTable
 /// into a new SSTable.
 pub const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
@@ -95,6 +105,36 @@ impl Keys {
             manifest: sub(b"zb:manifest"),
         }
     }
+
+    /// Derive a subkey under an external label. The label is prefixed with
+    /// `ext:` on the wire so external consumers (auth, sql) cannot collide
+    /// with any internal label (`zb:…`).
+    fn derive_external(&self, label: &[u8]) -> SymKey {
+        // We need the master to derive; but we only keep the derived
+        // subkeys. Re-derive from one of them is not correct. Instead,
+        // expose a separate path that re-uses `wal_enc` as an intermediate
+        // key: HKDF-style `keyed_hash(wal_enc, "ext:" || label)`. That keeps
+        // the master never-leaving semantics while giving every external
+        // caller a fresh domain.
+        let mut input = Vec::with_capacity(4 + label.len());
+        input.extend_from_slice(b"ext:");
+        input.extend_from_slice(label);
+        SymKey::from_bytes(crate::crypto::keyed_hash(&self.wal_enc, &input))
+    }
+}
+
+/// Compute the exclusive upper bound for `scan(prefix)`. Returns `None` when
+/// the prefix is entirely 0xFF (no tighter upper bound exists).
+fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.last_mut() {
+        if *last < 0xFF {
+            *last += 1;
+            return Some(out);
+        }
+        out.pop();
+    }
+    None
 }
 
 impl Db {
@@ -243,6 +283,92 @@ impl Db {
             }
         }
         None
+    }
+
+    /// Write a batch of operations under a single fsync. Each op still
+    /// produces its own WAL frame (so the hash chain keeps its per-op
+    /// granularity) but we only sync once at the end.
+    ///
+    /// Atomicity: if an earlier append succeeds but a later one fails,
+    /// already-written frames remain on disk. WAL replay on next open will
+    /// either accept the tail (if every frame is valid) or refuse the open
+    /// outright — we never silently truncate.
+    pub fn batch(&mut self, ops: &[Op]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        for op in ops {
+            self.wal.append(op)?;
+        }
+        self.wal.sync()?;
+        for op in ops {
+            match op.clone() {
+                Op::Put { key, value } => self.memtable.put(key, value),
+                Op::Delete { key } => self.memtable.delete(key),
+            }
+        }
+        self.maybe_flush()?;
+        Ok(())
+    }
+
+    /// Derive a domain-separated subkey from the master. Used by upper
+    /// layers (auth, SQL) to get their own signing/encryption keys without
+    /// needing access to the master directly.
+    #[must_use]
+    pub fn derive_subkey(&self, label: &[u8]) -> SymKey {
+        self.keys.derive_external(label)
+    }
+
+    /// Iterate every live entry whose key starts with `prefix`, in ascending
+    /// key order. Tombstones and values shadowed by newer tombstones are
+    /// filtered out. Results are materialized eagerly into a snapshot.
+    #[must_use]
+    pub fn scan(&self, prefix: &[u8]) -> Vec<ScanItem> {
+        let end = prefix_upper_bound(prefix);
+        self.range_inner(prefix, end.as_deref().unwrap_or(&[]))
+    }
+
+    /// Iterate every live entry in `[start, end)`. An empty `end` (`&[]`)
+    /// means unbounded. Results are eagerly materialized into a snapshot.
+    #[must_use]
+    pub fn range(&self, start: &[u8], end: &[u8]) -> Vec<ScanItem> {
+        self.range_inner(start, end)
+    }
+
+    fn range_inner(&self, start: &[u8], end: &[u8]) -> Vec<ScanItem> {
+        // Newest-wins merge across memtable + sstables (newest first).
+        // We walk every source's sorted slice and de-duplicate by key.
+        use std::collections::BTreeMap;
+
+        // Accumulate `key -> (age_rank, entry)` where a smaller age_rank means
+        // newer. Rank 0 is the memtable; sstables follow in reverse order
+        // (newest first, since self.sstables is insertion order oldest..newest
+        // — flush() pushes newer ones at the end).
+        let mut best: BTreeMap<Vec<u8>, (usize, Entry)> = BTreeMap::new();
+
+        for (k, e) in self.memtable.range(start, end) {
+            best.insert(k.to_vec(), (0, e.clone()));
+        }
+
+        for (rank_offset, (_id, entries)) in self.sstables.iter().rev().enumerate() {
+            let rank = rank_offset + 1;
+            let lo = entries.partition_point(|(k, _)| k.as_slice() < start);
+            let hi = if end.is_empty() {
+                entries.len()
+            } else {
+                entries.partition_point(|(k, _)| k.as_slice() < end)
+            };
+            for (k, e) in &entries[lo..hi] {
+                best.entry(k.clone()).or_insert_with(|| (rank, e.clone()));
+            }
+        }
+
+        best.into_iter()
+            .filter_map(|(k, (_rank, e))| match e {
+                Entry::Value(v) => Some(ScanItem { key: k, value: v }),
+                Entry::Tombstone => None,
+            })
+            .collect()
     }
 
     /// Force an immediate MemTable → SSTable flush.
@@ -434,6 +560,77 @@ mod tests {
         }
         let db = Db::open(dir.path(), &weak_pass()).unwrap();
         assert_eq!(db.get(b"persist-me"), Some(b"forever".to_vec()));
+    }
+
+    #[test]
+    fn scan_and_range_honor_newest_wins() {
+        let dir = TempDir::new().unwrap();
+        let mut db = Db::create_with(
+            dir.path(),
+            &weak_pass(),
+            Argon2Params { m_cost_kib: 8 * 1024, t_cost: 1, parallelism: 1, _reserved: 0 },
+            1024 * 1024,
+        )
+        .unwrap();
+
+        db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+        db.put(b"b".to_vec(), b"2".to_vec()).unwrap();
+        db.put(b"c".to_vec(), b"3".to_vec()).unwrap();
+        db.flush().unwrap(); // push to an SSTable
+
+        db.put(b"b".to_vec(), b"22".to_vec()).unwrap(); // override in memtable
+        db.delete(b"c".to_vec()).unwrap(); // tombstone newer than SSTable
+
+        let all = db.scan(b"");
+        let pairs: Vec<(&[u8], &[u8])> =
+            all.iter().map(|i| (i.key.as_slice(), i.value.as_slice())).collect();
+        assert_eq!(pairs, vec![(&b"a"[..], &b"1"[..]), (&b"b"[..], &b"22"[..])]);
+
+        let between = db.range(b"b", b"c");
+        let keys: Vec<&[u8]> = between.iter().map(|i| i.key.as_slice()).collect();
+        assert_eq!(keys, vec![&b"b"[..]]);
+    }
+
+    #[test]
+    fn batch_writes_are_visible_after_reopen() {
+        let dir = TempDir::new().unwrap();
+        {
+            let mut db = Db::create_with(
+                dir.path(),
+                &weak_pass(),
+                Argon2Params { m_cost_kib: 8 * 1024, t_cost: 1, parallelism: 1, _reserved: 0 },
+                1024 * 1024,
+            )
+            .unwrap();
+            db.batch(&[
+                Op::Put { key: b"k1".to_vec(), value: b"v1".to_vec() },
+                Op::Put { key: b"k2".to_vec(), value: b"v2".to_vec() },
+                Op::Delete { key: b"k1".to_vec() },
+            ])
+            .unwrap();
+            db.close().unwrap();
+        }
+        let db = Db::open(dir.path(), &weak_pass()).unwrap();
+        assert_eq!(db.get(b"k1"), None);
+        assert_eq!(db.get(b"k2"), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn derive_subkey_is_stable_and_domain_separated() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::create_with(
+            dir.path(),
+            &weak_pass(),
+            Argon2Params { m_cost_kib: 8 * 1024, t_cost: 1, parallelism: 1, _reserved: 0 },
+            1024 * 1024,
+        )
+        .unwrap();
+        let a1 = db.derive_subkey(b"zb:auth:cap:sign");
+        let a2 = db.derive_subkey(b"zb:auth:cap:sign");
+        let b = db.derive_subkey(b"zb:auth:cap:other");
+        use subtle::ConstantTimeEq;
+        assert!(bool::from(a1.ct_eq(&a2)));
+        assert!(!bool::from(a1.ct_eq(&b)));
     }
 
     #[test]

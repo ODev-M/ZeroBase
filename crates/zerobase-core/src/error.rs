@@ -36,6 +36,28 @@ pub enum Error {
     /// Generic encoding failure (bincode, etc.).
     #[error("encoding")]
     Encoding,
+
+    /// A statement or operation referenced a resource outside its scope.
+    /// Used by the SQL and auth layers.
+    #[error("out of scope")]
+    OutOfScope,
+
+    /// An attempt to register a client pubkey that already exists.
+    #[error("already registered")]
+    AlreadyRegistered,
+
+    /// A capability token's expiry is in the past.
+    #[error("capability expired")]
+    CapabilityExpired,
+
+    /// A capability token has already been consumed.
+    #[error("capability reused")]
+    CapabilityReused,
+
+    /// A SQL statement could not be parsed or was unsupported. Kept opaque
+    /// on purpose — details go to tracing only.
+    #[error("bad sql")]
+    BadSql,
 }
 
 impl From<bincode::Error> for Error {
