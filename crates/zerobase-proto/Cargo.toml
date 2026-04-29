@@ -1,0 +1,19 @@
+[package]
+name        = "zerobase-proto"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Wire protocol (length-prefixed bincode frames) for the Zerobase daemon."
+
+[lib]
+name = "zerobase_proto"
+path = "src/lib.rs"
+
+[dependencies]
+zerobase-auth = { path = "../zerobase-auth" }
+zerobase-caps = { path = "../zerobase-caps" }
+serde         = { workspace = true }
+bincode       = { workspace = true }
+thiserror     = { workspace = true }

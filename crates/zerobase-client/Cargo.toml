@@ -1,0 +1,24 @@
+[package]
+name        = "zerobase-client"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Synchronous client SDK for the Zerobase daemon."
+
+[dependencies]
+zerobase-auth  = { path = "../zerobase-auth" }
+zerobase-caps  = { path = "../zerobase-caps" }
+zerobase-proto = { path = "../zerobase-proto" }
+
+thiserror = { workspace = true }
+serde     = { workspace = true }
+bincode   = { workspace = true }
+
+[dev-dependencies]
+zerobase        = { path = "../zerobase-core", package = "zerobase-core" }
+zerobase-sql    = { path = "../zerobase-sql" }
+zerobase-server = { path = "../zerobase-server" }
+secrecy         = { workspace = true }
+tempfile        = { workspace = true }

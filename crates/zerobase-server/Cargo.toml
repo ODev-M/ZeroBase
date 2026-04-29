@@ -1,0 +1,37 @@
+[package]
+name        = "zerobase-server"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Zerobase daemon (zerobased): TCP server speaking the zerobase wire protocol."
+
+[lib]
+name = "zerobase_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zerobased"
+path = "src/main.rs"
+
+[dependencies]
+zerobase-core  = { path = "../zerobase-core" }
+zerobase-sql   = { path = "../zerobase-sql" }
+zerobase-auth  = { path = "../zerobase-auth" }
+zerobase-proto = { path = "../zerobase-proto" }
+zerobase-caps  = { path = "../zerobase-caps" }
+
+clap          = { workspace = true }
+anyhow        = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand          = { workspace = true }
+serde         = { workspace = true }
+bincode       = { workspace = true }
+secrecy       = { workspace = true }
+hex           = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

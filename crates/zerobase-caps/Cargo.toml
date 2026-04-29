@@ -1,0 +1,22 @@
+[package]
+name        = "zerobase-caps"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+description = "Capability tokens (signed scope grants) for the Zerobase daemon."
+
+[lib]
+name = "zerobase_caps"
+path = "src/lib.rs"
+
+[dependencies]
+zerobase-auth = { path = "../zerobase-auth" }
+serde         = { workspace = true }
+serde-big-array = { workspace = true }
+bincode       = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+zerobase-auth = { path = "../zerobase-auth" }

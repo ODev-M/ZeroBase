@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/zerobase-core", "crates/zerobase-cli", "crates/zerobase-sql", "crates/zerobase-auth"]
+members = [
+    "crates/zerobase-core",
+    "crates/zerobase-cli",
+    "crates/zerobase-sql",
+    "crates/zerobase-auth",
+    "crates/zerobase-proto",
+    "crates/zerobase-caps",
+    "crates/zerobase-server",
+    "crates/zerobase-client",
+]
 
 [workspace.package]
 version     = "0.1.0"
@@ -38,7 +47,9 @@ parking_lot      = "0.12"
 
 # Errors & logging
 thiserror        = "1.0"
+anyhow           = "1.0"
 tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI
 clap             = { version = "4.5", features = ["derive", "env"] }
